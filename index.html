@@ -56,6 +56,26 @@
   #clear-title { font-size: 40px; letter-spacing: 0.3em; margin-bottom: 0.6em; }
   #clear-time { font-size: 18px; color: #8a8a86; white-space: pre-line; text-align: center; }
   #clear.show { pointer-events: auto; }
+  #title {
+    position: fixed; inset: 0; z-index: 8; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    background: #f4f3ef; color: #3a3a3a;
+    font-family: -apple-system, "Hiragino Sans", sans-serif;
+  }
+  #title.show { display: flex; }
+  #title h1 {
+    font-size: 30px; letter-spacing: 0.28em; font-weight: 600;
+    margin: 0 0 0.5em; text-indent: 0.28em;
+  }
+  #title p { margin: 0 0 2.6em; font-size: 14px; color: #8a8a86; letter-spacing: 0.1em; }
+  #title .stages { display: flex; flex-direction: column; gap: 14px; width: min(78vw, 320px); }
+  #title button {
+    padding: 18px 24px; border-radius: 14px; cursor: pointer;
+    font-family: inherit; font-size: 16px; letter-spacing: 0.08em;
+    border: 1px solid #cfc9c0; background: #fff; color: #3a3a3a; text-align: left;
+  }
+  #title button b { display: block; font-size: 17px; margin-bottom: 4px; }
+  #title button span { font-size: 12px; color: #8a8a86; letter-spacing: 0.04em; }
   #clear-buttons { display: flex; gap: 18px; margin-top: 2.2em; }
   #clear-buttons button {
     padding: 16px 28px; border-radius: 30px; font-size: 16px; letter-spacing: 0.1em;
@@ -85,6 +105,14 @@
 </div>
 <div id="fade"></div>
 <div id="loading">よみこみちゅう…</div>
+<div id="title">
+  <h1>脱出ゲーム</h1>
+  <p>あそぶステージをえらんでください</p>
+  <div class="stages">
+    <button data-stage="1"><b>ステージ1　タピオカ店</b><span>クッションとボトルの裏をしらべる</span></button>
+    <button data-stage="2"><b>ステージ2　塾の教室</b><span>色と数字を手がかりにする</span></button>
+  </div>
+</div>
 <div id="nowebgl">Chrome または Safari で開いてください</div>
 <script type="module" src="./src/tapi.js"></script>
 </body>

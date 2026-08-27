@@ -31,7 +31,22 @@ if (!webglAvailable()) {
 
 /* ---------------- ステージ定義 ---------------- */
 const params = new URLSearchParams(location.search);
+// stage 指定がなければ、まずステージ選択画面を出す
+const HAS_STAGE = params.has('stage');
 const STAGE = params.get('stage') === '2' ? 2 : 1;
+
+if (!HAS_STAGE) {
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('fade').style.opacity = '0';
+  const title = document.getElementById('title');
+  title.classList.add('show');
+  title.querySelectorAll('button[data-stage]').forEach((b) => {
+    b.addEventListener('click', () => {
+      location.href = 'tapi.html?stage=' + b.dataset.stage;
+    });
+  });
+  throw new Error('stage-select'); // ここで停止し、部屋の読み込みはしない
+}
 const PREV_SEC = Math.max(0, parseInt(params.get('t') || '0', 10) || 0); // 前ステージまでの秒数
 
 // 通常は圧縮版（.min.glb 合計約4MB）を使う。?full=1 で元データに切り替え
@@ -768,7 +783,10 @@ window.__setView = (x, y, z, yw, pt) => { // 動作検証用
 const upNormal = new THREE.Vector3();
 function handleTap(x, y) {
   if (!ready || state.cleared) return;
-  if (state.inspecting) return; // 観察中は「もどる」を押すまで置けない
+  // 観察中のタップは、置ける面ならそこに置き、そうでなければ観察をやめる。
+  // どちらにしても観察モードから必ず抜けられるようにして、
+  // 「見たあとに置けない」状態で詰まらせない
+  if (state.inspecting) state.inspecting = false;
   const heldEntry = state.holding ? carryables.get(state.holding) : null;
   const res = pick(x, y, heldEntry ? heldEntry.node : null);
   if (!res) return;
