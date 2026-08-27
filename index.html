@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>TAPI TAPI 脱出</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  #app { position: fixed; inset: 0; touch-action: none; -webkit-user-select: none; user-select: none; }
+  #app canvas { display: block; }
+  #fade {
+    position: fixed; inset: 0; z-index: 6; background: #000; opacity: 1;
+    pointer-events: none; transition: opacity 0.4s linear;
+  }
+  #nowebgl {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    text-align: center; padding: 2em; color: #fff; background: #111;
+    font: 16px/1.8 -apple-system, "Hiragino Sans", sans-serif;
+  }
+  #loading {
+    position: fixed; inset: 0; z-index: 7; display: flex; align-items: center; justify-content: center;
+    color: #d8cfc6; background: #17161a; font: 14px/1.8 -apple-system, "Hiragino Sans", sans-serif;
+    letter-spacing: 0.2em; transition: opacity 0.4s linear;
+  }
+  #loading.hide { opacity: 0; pointer-events: none; }
+  #dpad {
+    position: fixed; left: 22px; bottom: 22px; width: 140px; height: 140px;
+    border-radius: 50%; background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.28);
+    z-index: 4; touch-action: none; -webkit-user-select: none; user-select: none;
+  }
+  #dpad .arrow {
+    position: absolute; color: rgba(255,255,255,0.55); font-size: 14px;
+    pointer-events: none; transform: translate(-50%, -50%);
+  }
+  #dpad-knob {
+    position: absolute; left: 50%; top: 50%; width: 56px; height: 56px;
+    margin: -28px 0 0 -28px; border-radius: 50%;
+    background: rgba(255,255,255,0.30); pointer-events: none;
+  }
+  #inspect {
+    position: fixed; right: 22px; bottom: 44px; z-index: 4; display: none;
+    padding: 14px 24px; border-radius: 28px;
+    border: 1px solid rgba(255,255,255,0.45);
+    background: rgba(28,28,32,0.55); color: #fff;
+    font: 15px/1 -apple-system, "Hiragino Sans", sans-serif; letter-spacing: 0.12em;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+  }
+  #clear {
+    position: fixed; inset: 0; z-index: 5;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: #f4f3ef; color: #3a3a3a; opacity: 0; pointer-events: none;
+    transition: opacity 1s ease; font-family: -apple-system, "Hiragino Sans", sans-serif;
+  }
+  #clear.show { opacity: 1; }
+  #clear-title { font-size: 40px; letter-spacing: 0.3em; margin-bottom: 0.6em; }
+  #clear-time { font-size: 18px; color: #8a8a86; white-space: pre-line; text-align: center; }
+  #clear.show { pointer-events: auto; }
+  #clear-buttons { display: flex; gap: 18px; margin-top: 2.2em; }
+  #clear-buttons button {
+    padding: 16px 28px; border-radius: 30px; font-size: 16px; letter-spacing: 0.1em;
+    font-family: -apple-system, "Hiragino Sans", sans-serif; cursor: pointer;
+    border: 1px solid #b9b4ac; background: #fff; color: #3a3a3a;
+  }
+  #clear-buttons button.primary { background: #3a3a3a; color: #f4f3ef; border-color: #3a3a3a; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="app"></div>
+<div id="dpad">
+  <span class="arrow" style="left:50%;top:14%">▲</span>
+  <span class="arrow" style="left:50%;top:86%">▼</span>
+  <span class="arrow" style="left:14%;top:50%">◀</span>
+  <span class="arrow" style="left:86%;top:50%">▶</span>
+  <div id="dpad-knob"></div>
+</div>
+<button id="inspect">詳細を見る</button>
+<div id="clear">
+  <div id="clear-title">脱出成功</div>
+  <div id="clear-time"></div>
+  <div id="clear-buttons"></div>
+</div>
+<div id="fade"></div>
+<div id="loading">よみこみちゅう…</div>
+<div id="nowebgl">Chrome または Safari で開いてください</div>
+<script type="module" src="./src/tapi.js"></script>
+</body>
+</html>
