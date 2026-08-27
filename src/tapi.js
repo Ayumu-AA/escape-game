@@ -45,7 +45,9 @@ const STAGE_DEF = {
     ceilY: 3.85,
     ceilColor: 0xf3ede6,
     sky: 0xe9e2da,
-    // 前方一致にしておく（圧縮版はメッシュ統合で _1 等の枝番が変わるため）
+    // 前方一致にしておく（圧縮版はメッシュ統合で _1 等の枝番が変わるため）。
+    // 圧縮版では名前が mesh_NN に変わる物もあるので、名前で拾えない分は
+    // 形と大きさから自動で衝突判定を作る（buildColliders 参照）
     colliders: /^(Counter_Main|Counter_Side|Table_Round|Table_Wood|Sofa_|Chair_|Stool_Wood|Shelf_Bottles|Register)/,
     correct: [4, 7, 2],
     start: { x: 4.6, z: -4.6, yaw: Math.PI / 2 },
@@ -63,7 +65,7 @@ const STAGE_DEF = {
     colliders: /^(立方体|Shelf|Shose|Kohe|Iwata|Personal-Desk|Screw)/,
     colliderExclude: /^(立方体021|立方体025)/, // 開く引き戸は衝突から外す
     correct: [5, 8, 3],
-    start: { x: -4.5, z: -13.0, yaw: Math.PI }, // 教室の奥の通路から入口方向を向く
+    start: { x: -1.4, z: -8.6, yaw: Math.PI }, // 教室中央の通路。入口（+z）方向を向く
     // 表示の3桁は赤・青・黄（隠し数字の色と対応）。
     // レバーのノブはあえて全部同じ色にする: どのレバーがどの色の桁を
     // 動かすかは、実際に引いてみて表示の変化で気づかせる
@@ -167,7 +169,7 @@ function makeSevenSeg(h, color) {
 const raycastList = [];       // タップ判定の対象
 const colliders = [];         // 歩行をブロックするAABB
 const carryables = new Map(); // name -> { node, offsetY, quat0 }
-let bounds = { x1: -8, x2: 5, z1: -8.5, z2: 0 };
+let bounds = { x1: -8, x2: 5, z1: -8.5, z2: 0, floorY: 0 };
 let doorParts = [];           // スライドさせるドアのメッシュ
 let doorZone = null;          // 出口の通過判定（ステージごとに形が違う）
 let dialSegs = [];
@@ -303,6 +305,7 @@ gltfLoader.load(DEF.glb, (gltf) => {
     bounds = {
       x1: fb.min.x + PLAYER_R, x2: fb.max.x - PLAYER_R,
       z1: fb.min.z + PLAYER_R, z2: fb.max.z - PLAYER_R,
+      floorY: fb.min.y,
     };
     // 天井（どちらのモデルにも無いので1枚足す）
     const ceil = new THREE.Mesh(
@@ -319,28 +322,70 @@ gltfLoader.load(DEF.glb, (gltf) => {
 
   // 家具・壁の衝突AABBと、タップ判定リストを組む（ドア決定後に呼ぶ）
   function buildColliders() {
+    const floorY = bounds.floorY;
     gltf.scene.traverse((o) => {
       if (!o.isMesh) return;
       raycastList.push(o);
-      if (!DEF.colliders.test(o.name)) return;
       if (doorMeshSet.has(o)) return;
       const b = box(o);
-      if (b.min.y > 1.4 || b.max.y < 0.25) return; // 頭上・床すれすれの物は無視
+
+      // 名前で拾えるものは従来どおり。拾えないもの（圧縮で mesh_NN に
+      // なった壁・机・ホワイトボード等）は、形と大きさから機械的に判定する
+      let blocking = DEF.colliders.test(o.name);
+      if (!blocking) {
+        const w = b.max.x - b.min.x;
+        const d = b.max.z - b.min.z;
+        const h = b.max.y - b.min.y;
+        const footprint = Math.max(w, d);
+        // 床に立っていて、幅も高さもある大きな物だけを壁として扱う。
+        // 壁・仕切り・机・棚・ホワイトボードが該当する。
+        // 椅子のような小さい物まで塞ぐと通路が埋まって歩けなくなるため除外する
+        blocking = b.min.y < floorY + 1.0 && h > 0.35 && footprint > 0.9;
+        // 天井・床のような薄くて巨大な面は除外（歩行の邪魔をしない）
+        if (h < 0.12 && footprint > 4) blocking = false;
+        // 持ち運べる物は通り抜けさせる（拾う前に体当たりして詰まらないように）
+        if (o.userData.tag === 'carry') blocking = false;
+        let p = o.parent;
+        while (p && blocking) {
+          if (p.userData && p.userData.tag === 'carry') blocking = false;
+          p = p.parent;
+        }
+      }
+      if (!blocking) return;
+      if (b.min.y > floorY + 1.4 || b.max.y < floorY + 0.25) return; // 頭上・床すれすれは無視
       const c = {
         x1: b.min.x - PLAYER_R, x2: b.max.x + PLAYER_R,
         z1: b.min.z - PLAYER_R, z2: b.max.z + PLAYER_R,
       };
-      // 出口の通り道と重なる衝突箱（戸のレール等）は外す。
-      // 通り道は正解までドア本体の位置クランプで塞がっている
-      if (doorZone && doorZone.axis === 'z' &&
-          c.x2 > doorZone.lat1 && c.x1 < doorZone.lat2 &&
-          c.z2 > doorZone.bound - 0.1 && c.z1 < doorZone.out + 1.0) {
-        return;
-      }
-      if (doorZone && doorZone.axis === 'x' &&
-          c.z2 > doorZone.lat1 && c.z1 < doorZone.lat2 &&
-          c.x1 < doorZone.bound + 0.1 && c.x2 > doorZone.out - 1.0) {
-        return;
+      // 出口の戸口だけは、壁の判定から切り欠く。
+      // 壁ごと判定から外すと壁全体がすり抜けられてしまうため、
+      // 重なった分だけ削って壁の残りは通行不可のまま保つ
+      if (doorZone) {
+        const [g1, g2] = doorZone.axis === 'z'
+          ? [doorZone.lat1, doorZone.lat2]   // 戸口の左右（x方向）
+          : [doorZone.lat1, doorZone.lat2];  // 戸口の前後（z方向）
+        const near = doorZone.axis === 'z'
+          ? (c.z2 > doorZone.bound - 0.6 && c.z1 < doorZone.out + 0.6)
+          : (c.x1 < doorZone.bound + 0.6 && c.x2 > doorZone.out - 0.6);
+        if (near) {
+          const lo = doorZone.axis === 'z' ? c.x1 : c.z1;
+          const hi = doorZone.axis === 'z' ? c.x2 : c.z2;
+          if (hi > g1 && lo < g2) {
+            // 戸口より手前側の残り
+            if (lo < g1) {
+              const left = { ...c };
+              if (doorZone.axis === 'z') left.x2 = g1; else left.z2 = g1;
+              colliders.push(left);
+            }
+            // 戸口より奥側の残り
+            if (hi > g2) {
+              const right = { ...c };
+              if (doorZone.axis === 'z') right.x1 = g2; else right.z1 = g2;
+              colliders.push(right);
+            }
+            return; // 戸口部分は塞がない
+          }
+        }
       }
       colliders.push(c);
     });
@@ -530,6 +575,30 @@ gltfLoader.load(DEF.glb, (gltf) => {
   }
 
   buildColliders();
+  window.__colliders = colliders; // 動作検証用
+
+  // 開始位置が家具の中に埋まっていたら、いちばん近い空き場所へ押し出す。
+  // 部屋のモデルを差し替えても開始直後に動けなくなる事故を防ぐ
+  {
+    const inside = (x, z) =>
+      colliders.some((c) => x > c.x1 && x < c.x2 && z > c.z1 && z < c.z2);
+    if (inside(camera.position.x, camera.position.z)) {
+      let moved = false;
+      for (let r = 0.25; r <= 4 && !moved; r += 0.25) {
+        for (let a = 0; a < 360; a += 10) {
+          const x = camera.position.x + r * Math.cos(a * Math.PI / 180);
+          const z = camera.position.z + r * Math.sin(a * Math.PI / 180);
+          if (!inside(x, z)) {
+            camera.position.x = x;
+            camera.position.z = z;
+            moved = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   ready = true;
   window.__doorZone = doorZone; // 動作検証用
   window.__doorParts = doorParts.map((m) => m.name); // 動作検証用
