@@ -97,7 +97,10 @@ const DEF = STAGE_DEF[STAGE];
 /* ---------------- 定数 ---------------- */
 const EYE = 1.6;
 const WALK_SPEED = 2.5;
-const PLAYER_R = 0.3;
+const PLAYER_R = 0.22;   // 体の半径。狭い通路を通れる程度に小さくする
+const CELL = 0.2;        // 衝突判定の格子の1マス
+const BAND_LO = 0.18;    // 床からこの高さより上を「体がぶつかる範囲」とする
+const BAND_HI = 1.35;    // 頭より上（垂れ下がりや天井）は無視する
 const HOLD_DIST = 1.1;    // 持った物はカメラ前1.1m（近すぎると画面を覆う）
 const PLACE_DIST = 3.5;   // 置ける・拾える距離
 const PITCH_LIMIT = 70 * (Math.PI / 180);
@@ -182,8 +185,27 @@ function makeSevenSeg(h, color) {
 
 /* ---------------- 進行用の入れ物（モデル読込後に埋まる） ---------------- */
 const raycastList = [];       // タップ判定の対象
-const colliders = [];         // 歩行をブロックするAABB
 const carryables = new Map(); // name -> { node, offsetY, quat0 }
+// 通れない場所を格子で持つ。物の形どおりに塞げるので、
+// コの字の自習ブースの内側や、壁と壁の隙間を正しく通れる
+const blockGrid = new Set();
+const cellKey = (i, j) => i + ',' + j;
+function markCell(x, z) {
+  blockGrid.add(cellKey(Math.floor(x / CELL), Math.floor(z / CELL)));
+}
+function cellBlocked(x, z) {
+  return blockGrid.has(cellKey(Math.floor(x / CELL), Math.floor(z / CELL)));
+}
+// 体の太さぶんを見て、その位置に立てるか判定する
+function isBlocked(x, z) {
+  const r = PLAYER_R;
+  for (let dx = -r; dx <= r + 1e-6; dx += r) {
+    for (let dz = -r; dz <= r + 1e-6; dz += r) {
+      if (cellBlocked(x + dx, z + dz)) return true;
+    }
+  }
+  return false;
+}
 let bounds = { x1: -8, x2: 5, z1: -8.5, z2: 0, floorY: 0 };
 let doorParts = [];           // スライドさせるドアのメッシュ
 let doorZone = null;          // 出口の通過判定（ステージごとに形が違う）
@@ -367,43 +389,61 @@ gltfLoader.load(DEF.glb, (gltf) => {
         }
       }
       if (!blocking) return;
-      if (b.min.y > floorY + 1.4 || b.max.y < floorY + 0.25) return; // 頭上・床すれすれは無視
-      const c = {
-        x1: b.min.x - PLAYER_R, x2: b.max.x + PLAYER_R,
-        z1: b.min.z - PLAYER_R, z2: b.max.z + PLAYER_R,
-      };
-      // 出口の戸口だけは、壁の判定から切り欠く。
-      // 壁ごと判定から外すと壁全体がすり抜けられてしまうため、
-      // 重なった分だけ削って壁の残りは通行不可のまま保つ
-      if (doorZone) {
-        const [g1, g2] = doorZone.axis === 'z'
-          ? [doorZone.lat1, doorZone.lat2]   // 戸口の左右（x方向）
-          : [doorZone.lat1, doorZone.lat2];  // 戸口の前後（z方向）
-        const near = doorZone.axis === 'z'
-          ? (c.z2 > doorZone.bound - 0.6 && c.z1 < doorZone.out + 0.6)
-          : (c.x1 < doorZone.bound + 0.6 && c.x2 > doorZone.out - 0.6);
-        if (near) {
-          const lo = doorZone.axis === 'z' ? c.x1 : c.z1;
-          const hi = doorZone.axis === 'z' ? c.x2 : c.z2;
-          if (hi > g1 && lo < g2) {
-            // 戸口より手前側の残り
-            if (lo < g1) {
-              const left = { ...c };
-              if (doorZone.axis === 'z') left.x2 = g1; else left.z2 = g1;
-              colliders.push(left);
-            }
-            // 戸口より奥側の残り
-            if (hi > g2) {
-              const right = { ...c };
-              if (doorZone.axis === 'z') right.x1 = g2; else right.z1 = g2;
-              colliders.push(right);
-            }
-            return; // 戸口部分は塞がない
-          }
+      if (b.min.y > floorY + BAND_HI || b.max.y < floorY + BAND_LO) return; // 頭上・床すれすれは無視
+
+      // 物の形どおりに格子を塗る。箱でまとめて塞ぐと、
+      // コの字の自習ブースは内側まで埋まり、壁の隙間も実際より狭くなる
+      rasterize(o, floorY);
+    });
+
+    // 出口の戸口だけ、格子から切り欠いて通れるようにする
+    // （正解までは collideMove 側のクランプで塞いでいる）
+    if (doorZone) {
+      const a1 = doorZone.lat1 + 0.05, a2 = doorZone.lat2 - 0.05;
+      const lo = Math.min(doorZone.bound, doorZone.out) - 0.7;
+      const hi = Math.max(doorZone.bound, doorZone.out) + 0.7;
+      for (let a = a1; a <= a2; a += CELL / 2) {
+        for (let b2 = lo; b2 <= hi; b2 += CELL / 2) {
+          const x = doorZone.axis === 'z' ? a : b2;
+          const z = doorZone.axis === 'z' ? b2 : a;
+          blockGrid.delete(cellKey(Math.floor(x / CELL), Math.floor(z / CELL)));
         }
       }
-      colliders.push(c);
-    });
+    }
+  }
+
+  // メッシュの三角形を、腰の高さ帯だけ格子に落とし込む
+  const triA = new THREE.Vector3(), triB = new THREE.Vector3(), triC = new THREE.Vector3();
+  function rasterize(mesh, floorY) {
+    const geo = mesh.geometry;
+    const pos = geo.getAttribute('position');
+    if (!pos) return;
+    const idx = geo.index;
+    const triCount = (idx ? idx.count : pos.count) / 3;
+    const lo = floorY + BAND_LO, hi = floorY + BAND_HI;
+    // 三角形が多すぎる物は、外形の箱で代用する（処理時間を抑える）
+    if (triCount > 20000) {
+      const b = new THREE.Box3().setFromObject(mesh);
+      for (let x = b.min.x; x <= b.max.x; x += CELL / 2)
+        for (let z = b.min.z; z <= b.max.z; z += CELL / 2) markCell(x, z);
+      return;
+    }
+    for (let t = 0; t < triCount; t++) {
+      const i0 = idx ? idx.getX(t * 3) : t * 3;
+      const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+      const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      triA.fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld);
+      triB.fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld);
+      triC.fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld);
+      const yMin = Math.min(triA.y, triB.y, triC.y);
+      const yMax = Math.max(triA.y, triB.y, triC.y);
+      if (yMax < lo || yMin > hi) continue; // 体の高さに掛からない面は無視
+      const x1 = Math.min(triA.x, triB.x, triC.x), x2 = Math.max(triA.x, triB.x, triC.x);
+      const z1 = Math.min(triA.z, triB.z, triC.z), z2 = Math.max(triA.z, triB.z, triC.z);
+      for (let x = x1; x <= x2 + CELL; x += CELL / 2)
+        for (let z = z1; z <= z2 + CELL; z += CELL / 2)
+          markCell(Math.min(x, x2), Math.min(z, z2));
+    }
   }
 
   if (STAGE === 1) {
@@ -590,13 +630,13 @@ gltfLoader.load(DEF.glb, (gltf) => {
   }
 
   buildColliders();
-  window.__colliders = colliders; // 動作検証用
+  window.__blockGrid = blockGrid; // 動作検証用
+  window.__isBlocked = isBlocked; // 動作検証用
 
   // 開始位置が家具の中に埋まっていたら、いちばん近い空き場所へ押し出す。
   // 部屋のモデルを差し替えても開始直後に動けなくなる事故を防ぐ
   {
-    const inside = (x, z) =>
-      colliders.some((c) => x > c.x1 && x < c.x2 && z > c.z1 && z < c.z2);
+    const inside = (x, z) => isBlocked(x, z);
     if (inside(camera.position.x, camera.position.z)) {
       let moved = false;
       for (let r = 0.25; r <= 4 && !moved; r += 0.25) {
@@ -960,15 +1000,12 @@ function collideMove(nx, nz) {
     nx = Math.max(bounds.x1, Math.min(bounds.x2, nx));
     nz = Math.max(bounds.z1, Math.min(bounds.z2, nz));
   }
-  for (const c of colliders) {
-    if (nx > c.x1 && nx < c.x2 && nz > c.z1 && nz < c.z2) {
-      const pen = [nx - c.x1, c.x2 - nx, nz - c.z1, c.z2 - nz];
-      const m = Math.min(...pen);
-      if (m === pen[0]) nx = c.x1;
-      else if (m === pen[1]) nx = c.x2;
-      else if (m === pen[2]) nz = c.z1;
-      else nz = c.z2;
-    }
+  // 塞がっていたら、片方の軸だけ動かして壁ずりさせる
+  if (isBlocked(nx, nz)) {
+    const cx = camera.position.x, cz = camera.position.z;
+    if (!isBlocked(nx, cz)) nz = cz;
+    else if (!isBlocked(cx, nz)) nx = cx;
+    else { nx = cx; nz = cz; }
   }
   return [nx, nz];
 }
