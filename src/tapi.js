@@ -97,8 +97,8 @@ const DEF = STAGE_DEF[STAGE];
 /* ---------------- 定数 ---------------- */
 const EYE = 1.6;
 const WALK_SPEED = 2.5;
-const PLAYER_R = 0.22;   // 体の半径。狭い通路を通れる程度に小さくする
-const CELL = 0.2;        // 衝突判定の格子の1マス
+const PLAYER_R = 0.18;   // 体の半径。狭い通路を通れる程度に小さくする
+const CELL = 0.1;        // 衝突判定の格子。細かいほど板の判定が実物に近づく
 const BAND_LO = 0.18;    // 床からこの高さより上を「体がぶつかる範囲」とする
 const BAND_HI = 1.35;    // 頭より上（垂れ下がりや天井）は無視する
 const HOLD_DIST = 1.1;    // 持った物はカメラ前1.1m（近すぎると画面を覆う）
