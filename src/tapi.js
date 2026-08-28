@@ -111,6 +111,7 @@ const state = {
   inspecting: false, // 「詳細を見る」中（ドラッグで持ち物を360°回す）
   dial: [0, 0, 0],   // 表示中の3桁。桁ごとに対応するレバーで進める
   solved: false,
+  unlocked: false,   // ステージ2: 教卓の引き出しが開いたか
   cleared: false,
 };
 window.__state = state; // 動作検証用
@@ -213,6 +214,8 @@ let dialSegs = [];
 const leverPivots = [];
 const leverBusy = [false, false, false];
 let ready = false;
+let capInfo = null;    // ステージ1: ボトルの蓋 { owner, lid, paper, opened }
+let drawerInfo = null; // ステージ2: 教卓の引き出し { group, openX, busy }
 
 /* ---------------- 共通部品 ---------------- */
 function registerCarry(node) {
@@ -497,8 +500,66 @@ gltfLoader.load(DEF.glb, (gltf) => {
       window.__hidden.push(seg.group);
     };
     markCushion(carryables.get('Cushion_07').node, 4);
-    markBottom(carryables.get('BottleSet_1').node, 7, 0xf2ede6);
     markCushion(carryables.get('Cushion_02').node, 2);
+
+    // 中桁「7」: カウンターのボトル。蓋を外すと中から「7」の紙が出てくる。
+    // 手に取って蓋をタップ → 蓋が飛んで床に落ち、紙がせり上がる
+    {
+      const bottle = carryables.get('BottleSet_1').node;
+      const bb = box(bottle);
+      const topC = new THREE.Vector3(
+        (bb.min.x + bb.max.x) / 2, bb.max.y, (bb.min.z + bb.max.z) / 2);
+
+      // 蓋（プリミティブ）: 本体より少し広い円盤 + つまみ
+      const lid = new THREE.Group();
+      lid.name = 'BottleLid';
+      const lidTop = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.145, 0.15, 0.035, 24),
+        new THREE.MeshLambertMaterial({ color: 0xe9e2d6 })
+      );
+      lid.add(lidTop);
+      const lidKnob = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.045, 0.05, 0.03, 16),
+        new THREE.MeshLambertMaterial({ color: 0xd6cfc2 })
+      );
+      lidKnob.position.y = 0.03;
+      lid.add(lidKnob);
+      lid.position.copy(bottle.worldToLocal(
+        topC.clone().add(new THREE.Vector3(0, 0.015, 0))));
+      // ボトルのノードは非一様な縮小が掛かっているため、
+      // 子にする蓋・紙には逆スケール・逆回転を入れて実寸で見せる
+      const bws = new THREE.Vector3();
+      bottle.getWorldScale(bws);
+      const bwq = new THREE.Quaternion();
+      bottle.getWorldQuaternion(bwq);
+      lid.scale.set(1 / bws.x, 1 / bws.y, 1 / bws.z);
+      lid.quaternion.copy(bwq.clone().invert());
+      bottle.add(lid);
+      raycastList.push(lid);
+
+      // 中の紙（7）: 蓋を外すまでボトル内に隠れている
+      const paper = new THREE.Group();
+      const sheet = new THREE.Mesh(
+        new THREE.BoxGeometry(0.09, 0.13, 0.004),
+        new THREE.MeshLambertMaterial({ color: 0xf7f4ec })
+      );
+      paper.add(sheet);
+      const pseg = makeSevenSeg(0.075, 0x2f2f2f);
+      pseg.set(7);
+      pseg.group.position.z = 0.004;
+      paper.add(pseg.group);
+      paper.position.copy(bottle.worldToLocal(
+        topC.clone().add(new THREE.Vector3(0, -0.16, 0))));
+      paper.scale.copy(lid.scale);
+      paper.quaternion.copy(lid.quaternion);
+      paper.visible = false; // 蓋を開けるまで見せない
+      bottle.add(paper);
+      window.__hidden.push(paper);
+
+      // 紙のせり上がり量はボトルのローカル単位（縮小が掛かる）で持つ
+      capInfo = { owner: 'BottleSet_1', lid, paper, opened: false,
+        riseY: 0.27 / bws.y };
+    }
 
     // ドア（西壁）: 正解で横にスライドして開く
     doorParts = ['Door_Panel', 'Door_Glass', 'Door_Knob']
@@ -540,23 +601,71 @@ gltfLoader.load(DEF.glb, (gltf) => {
     root.updateMatrixWorld(true);
     markBottom(redBook, 5, 0xd2413a, 0); // 本の底面は細長いので向きが90度違う
 
-    // 黄の「3」: 鏡の裏
-    if (mirror) {
-      const mb = box(mirror);
-      const scale = mirror.getWorldScale(new THREE.Vector3()).x || 1;
-      const seg = makeSevenSeg(0.14 / scale, 0xe8b93c);
-      seg.set(3);
-      const world = new THREE.Vector3(
-        mb.min.x - 0.004, (mb.min.y + mb.max.y) / 2 + 0.03, (mb.min.z + mb.max.z) / 2);
-      seg.group.position.copy(mirror.worldToLocal(world));
-      // 鏡のローカル軸は回転しているため、ワールドで「-x向き」になる姿勢を
-      // 親の逆回転を掛けて求める
-      const parentQ = mirror.getWorldQuaternion(new THREE.Quaternion());
-      const wantQ = new THREE.Quaternion().setFromAxisAngle(
-        new THREE.Vector3(0, 1, 0), -Math.PI / 2);
-      seg.group.quaternion.copy(parentQ.clone().invert().multiply(wantQ));
-      mirror.add(seg.group);
-      window.__hidden.push(seg.group);
+    // 黄の「3」への道のり: 鏡の後ろに鍵 → 教卓の引き出しを開けると「3」。
+    // 鍵（プリミティブ）を鏡の裏の机の上に置く。正面からは鏡に隠れて見えない
+    {
+      const key = new THREE.Group();
+      key.name = 'DrawerKey';
+      const brass = new THREE.MeshLambertMaterial({ color: 0xb8973a });
+      const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.013, 0.013), brass);
+      key.add(shaft);
+      const head = new THREE.Mesh(new THREE.TorusGeometry(0.024, 0.008, 8, 16), brass);
+      head.rotation.x = Math.PI / 2;
+      head.position.x = -0.055;
+      key.add(head);
+      const t1 = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.013, 0.022), brass);
+      t1.position.set(0.03, 0, 0.016);
+      key.add(t1);
+      const t2 = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.013, 0.022), brass);
+      t2.position.set(0.045, 0, 0.016);
+      key.add(t2);
+      // 小さいのでタップしやすいよう見えない当たり球を付ける
+      const hitBall = new THREE.Mesh(
+        new THREE.SphereGeometry(0.075, 8, 6),
+        new THREE.MeshBasicMaterial({ visible: false })
+      );
+      key.add(hitBall);
+      key.position.set(-0.4, 0.805, -6.1); // 鏡の裏、机の上
+      scene.add(key);
+      raycastList.push(key);
+      registerCarry(key);
+    }
+
+    // 教卓（Iwata-Desk）の引き出し: 鍵を持ってタップすると開き、黄の「3」
+    {
+      const drawer = new THREE.Group();
+      drawer.name = 'DeskDrawer';
+      drawer.userData.tag = 'lock';
+      const gray = new THREE.MeshLambertMaterial({ color: 0x9a938a });
+      // 前板（教卓の東面に付く）
+      const front = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.16, 0.45), gray);
+      drawer.add(front);
+      const knob = new THREE.Mesh(
+        new THREE.SphereGeometry(0.022, 12, 8),
+        new THREE.MeshLambertMaterial({ color: 0x4a453e })
+      );
+      knob.position.x = 0.028;
+      drawer.add(knob);
+      // 中のトレー（開くまで机の中）
+      const tray = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.012, 0.4),
+        new THREE.MeshLambertMaterial({ color: 0x7d766d }));
+      tray.position.set(-0.19, -0.065, 0);
+      drawer.add(tray);
+      const dseg = makeSevenSeg(0.11, 0xe8b93c);
+      dseg.set(3);
+      // 東(+x)から覗き込んで正立。立ったまま読めるよう35度ほど手前に起こす
+      const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+      const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+      const lean = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -0.85);
+      dseg.group.quaternion.copy(lean.multiply(qy).multiply(qx));
+      dseg.group.position.set(-0.1, 0.02, 0);
+      drawer.add(dseg.group);
+      window.__hidden.push(dseg.group);
+      // 教卓の東面（通路側）に取り付け
+      drawer.position.set(-0.875, 0.56, -0.65);
+      scene.add(drawer);
+      raycastList.push(drawer);
+      drawerInfo = { group: drawer, openX: drawer.position.x + 0.36, busy: false };
     }
 
     // 青の「8」: 自習ブース Personal-Desk003 の机の上。
@@ -741,6 +850,79 @@ function clearGame() {
   document.getElementById('clear').classList.add('show');
 }
 
+/* ---------------- ボトルの蓋 / 教卓の引き出し ---------------- */
+function openCap() {
+  if (!capInfo || capInfo.opened) return;
+  capInfo.opened = true;
+  const lid = capInfo.lid;
+  scene.attach(lid); // ワールド位置を保ったままボトルから切り離す
+  // 蓋は弧を描いて足元の床へ落ち、その後は拾って置ける物になる
+  const from = lid.position.clone();
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  fwd.y = 0;
+  fwd.normalize();
+  const land = camera.position.clone().addScaledVector(fwd, 0.7);
+  land.y = bounds.floorY + 0.03;
+  const fromQ = lid.quaternion.clone();
+  const tiltQ = fromQ.clone().multiply(
+    new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 2.6));
+  tween(0.55, (k) => {
+    lid.position.lerpVectors(from, land, k);
+    lid.position.y += Math.sin(Math.min(k, 1) * Math.PI) * 0.25; // 山なりに飛ぶ
+    lid.quaternion.slerpQuaternions(fromQ, tiltQ, k);
+  }, () => {
+    registerCarry(lid); // 以後は普通に拾って置ける
+  });
+  // 中の紙がせり上がる
+  const paper = capInfo.paper;
+  paper.visible = true;
+  const py = paper.position.y;
+  tween(0.5, (k) => { paper.position.y = py + capInfo.riseY * k; });
+}
+
+function openDrawer() {
+  if (!drawerInfo || state.unlocked || drawerInfo.busy) return;
+  state.unlocked = true;
+  const g = drawerInfo.group;
+  const fromX = g.position.x;
+  tween(0.5, (k) => { g.position.x = fromX + (drawerInfo.openX - fromX) * k; });
+
+  // 鍵は錠前に刺さったまま残る（手から離れ、以後は拾えない）。
+  // 持ったままだと視線の先に浮いて、引き出しの中身が見えなくなる
+  const keyEntry = carryables.get('DrawerKey');
+  if (keyEntry && state.holding === 'DrawerKey') {
+    const key = keyEntry.node;
+    carryables.delete('DrawerKey');
+    delete key.userData.tag;
+    state.holding = null;
+    state.inspecting = false;
+    g.attach(key); // 引き出しと一緒に動くようにする
+    const fromP = key.position.clone();
+    const fromQ = key.quaternion.clone();
+    const toP = new THREE.Vector3(0.06, -0.01, -0.15); // 前板の鍵穴の位置
+    const toQ = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, 1, 0), Math.PI); // 軸を差し込み向きに
+    tween(0.45, (k) => {
+      key.position.lerpVectors(fromP, toP, k);
+      key.quaternion.slerpQuaternions(fromQ, toQ, k);
+    });
+  }
+}
+
+function jiggleDrawer() {
+  if (!drawerInfo || drawerInfo.busy) return;
+  drawerInfo.busy = true;
+  const g = drawerInfo.group;
+  const x0 = g.position.x;
+  tween(0.3, (k) => {
+    g.position.x = x0 + Math.sin(k * Math.PI * 6) * 0.008; // ガタガタッ
+  }, () => {
+    g.position.x = x0;
+    drawerInfo.busy = false;
+  });
+}
+
 /* ---------------- レバー: 1回押すと対応する桁が1つ進む ---------------- */
 function pressLever(i) {
   const pivot = leverPivots[i];
@@ -823,6 +1005,18 @@ window.__setView = (x, y, z, yw, pt) => { // 動作検証用
 const upNormal = new THREE.Vector3();
 function handleTap(x, y) {
   if (!ready || state.cleared) return;
+
+  // ボトルの蓋: 持っているボトルの蓋をタップしたら外す。
+  // （持ち物は通常ピックから除外されるため、除外なしで先に調べる）
+  if (capInfo && !capInfo.opened && state.holding === capInfo.owner) {
+    const raw = pick(x, y, null);
+    if (raw) {
+      let p = raw.hit.object, onLid = false;
+      while (p) { if (p === capInfo.lid) { onLid = true; break; } p = p.parent; }
+      if (onLid) { openCap(); return; } // 観察モードは続ける
+    }
+  }
+
   // 観察中のタップは、置ける面ならそこに置き、そうでなければ観察をやめる。
   // どちらにしても観察モードから必ず抜けられるようにして、
   // 「見たあとに置けない」状態で詰まらせない
@@ -830,6 +1024,14 @@ function handleTap(x, y) {
   const heldEntry = state.holding ? carryables.get(state.holding) : null;
   const res = pick(x, y, heldEntry ? heldEntry.node : null);
   if (!res) return;
+
+  // 教卓の引き出し: 鍵を持ってタップすると開く。鍵なしはガタッと揺れる
+  if (res.tag === 'lock' && drawerInfo && res.hit.distance <= PLACE_DIST) {
+    if (state.unlocked) return;
+    if (state.holding === 'DrawerKey') openDrawer();
+    else jiggleDrawer();
+    return;
+  }
 
   if (state.holding) {
     // 置く: 上を向いた面を近距離でタップしたときだけ
