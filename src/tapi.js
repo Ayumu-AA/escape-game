@@ -218,6 +218,102 @@ let capInfo = null;    // ステージ1: ボトルの蓋 { owner, lid, paper, op
 let drawerInfo = null; // ステージ2: 教卓の引き出し { group, openX, busy }
 
 /* ---------------- 共通部品 ---------------- */
+// メッシュを高さで2つに割り、上側だけを新しいメッシュとして取り出す。
+// 同じマテリアル・同じ親に置くので、見た目は分ける前とまったく変わらない
+// メッシュを条件で2つに割り、条件に合う三角形を新しいメッシュとして取り出す。
+// 元のメッシュには残りが入る。同じマテリアル・同じ親に置くので、
+// 分ける前と見た目はまったく変わらない。test にはワールド座標の重心を渡す
+function splitMeshWhere(mesh, test) {
+  const geo = mesh.geometry;
+  const pos = geo.attributes.position;
+  const idx = geo.index;
+  const triCount = idx ? idx.count / 3 : pos.count / 3;
+  mesh.updateMatrixWorld(true);
+  const v = new THREE.Vector3();
+  const hit = [], rest = [];
+  for (let t = 0; t < triCount; t++) {
+    const a = idx ? idx.getX(t * 3) : t * 3;
+    const b = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+    const c = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+    v.set((pos.getX(a) + pos.getX(b) + pos.getX(c)) / 3,
+          (pos.getY(a) + pos.getY(b) + pos.getY(c)) / 3,
+          (pos.getZ(a) + pos.getZ(b) + pos.getZ(c)) / 3)
+      .applyMatrix4(mesh.matrixWorld);
+    (test(v.x, v.y, v.z) ? hit : rest).push({ a, b, c });
+  }
+  if (!hit.length || !rest.length) return null;
+
+  const build = (list) => {
+    const g = new THREE.BufferGeometry();
+    for (const name of Object.keys(geo.attributes)) {
+      const src = geo.attributes[name];
+      const it = src.itemSize;
+      const dst = new Float32Array(list.length * 3 * it);
+      let o = 0;
+      for (const t of list) {
+        for (const vi of [t.a, t.b, t.c]) {
+          for (let k = 0; k < it; k++) dst[o++] = src.getComponent(vi, k);
+        }
+      }
+      g.setAttribute(name, new THREE.BufferAttribute(dst, it));
+    }
+    g.computeBoundingBox();
+    g.computeBoundingSphere();
+    return g;
+  };
+
+  mesh.geometry = build(rest); // 元のメッシュからは取り出したぶんを除く
+
+  // 元データはミリ単位で作られていて、部品の原点が形状から遠く離れている。
+  // そのまま回すと原点を軸に大きく振り回されるので、原点を形状の中心へ移す
+  const newGeo = build(hit);
+  const c = newGeo.boundingBox.getCenter(new THREE.Vector3());
+  newGeo.translate(-c.x, -c.y, -c.z);
+  newGeo.computeBoundingBox();
+  newGeo.computeBoundingSphere();
+
+  const out = new THREE.Mesh(newGeo, mesh.material);
+  out.quaternion.copy(mesh.quaternion);
+  out.scale.copy(mesh.scale);
+  // 原点をずらしたぶん、親の座標系で押し戻して見た目の位置を保つ
+  out.position.copy(mesh.position)
+    .add(c.multiply(mesh.scale).applyQuaternion(mesh.quaternion));
+  mesh.parent.add(out); // 同じ親に置くので座標系はそのまま
+  return out;
+}
+
+// 高さ方向にいちばん大きく途切れるところで切り、上側だけを取り出す
+function splitTopPart(mesh) {
+  const geo = mesh.geometry;
+  const pos = geo.attributes.position;
+  const idx = geo.index;
+  const triCount = idx ? idx.count / 3 : pos.count / 3;
+  mesh.updateMatrixWorld(true);
+  const v = new THREE.Vector3();
+  const ys = [];
+  for (let t = 0; t < triCount; t++) {
+    const a = idx ? idx.getX(t * 3) : t * 3;
+    const b = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+    const c = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+    v.set((pos.getX(a) + pos.getX(b) + pos.getX(c)) / 3,
+          (pos.getY(a) + pos.getY(b) + pos.getY(c)) / 3,
+          (pos.getZ(a) + pos.getZ(b) + pos.getZ(c)) / 3)
+      .applyMatrix4(mesh.matrixWorld);
+    ys.push(v.y);
+  }
+  if (ys.length < 2) return null;
+  ys.sort((p, q) => p - q);
+  const mid = ys[0] + (ys[ys.length - 1] - ys[0]) * 0.5;
+  let gap = 0, cut = null;
+  for (let i = 1; i < ys.length; i++) {
+    if (ys[i] < mid) continue;
+    const d = ys[i] - ys[i - 1];
+    if (d > gap) { gap = d; cut = (ys[i] + ys[i - 1]) / 2; }
+  }
+  if (cut === null) return null;
+  return splitMeshWhere(mesh, (wx, wy) => wy > cut);
+}
+
 function registerCarry(node) {
   node.userData.tag = 'carry';
   const b = new THREE.Box3().setFromObject(node);
@@ -369,27 +465,28 @@ gltfLoader.load(DEF.glb, (gltf) => {
       if (doorMeshSet.has(o)) return;
       const b = box(o);
 
-      // 名前で拾えるものは従来どおり。拾えないもの（圧縮で mesh_NN に
-      // なった壁・机・ホワイトボード等）は、形と大きさから機械的に判定する
+      // 名前で拾えるものは従来どおり。圧縮すると個々のメッシュ名は
+      // mesh_NN に潰れるが、親ノードの名前（Table_Round_01 等）は残るので
+      // そこまで遡って照合する。ここを見ないと丸机や椅子が素通りになる
       let blocking = DEF.colliders.test(o.name);
+      for (let p = o.parent; p && !blocking; p = p.parent) {
+        if (p.name) blocking = DEF.colliders.test(p.name);
+      }
       if (!blocking) {
         const w = b.max.x - b.min.x;
         const d = b.max.z - b.min.z;
         const h = b.max.y - b.min.y;
         const footprint = Math.max(w, d);
         // 床に立っていて、幅も高さもある大きな物だけを壁として扱う。
-        // 壁・仕切り・机・棚・ホワイトボードが該当する。
-        // 椅子のような小さい物まで塞ぐと通路が埋まって歩けなくなるため除外する
+        // 壁・仕切り・机・棚・ホワイトボードが該当する
         blocking = b.min.y < floorY + 1.0 && h > 0.35 && footprint > 0.9;
         // 天井・床のような薄くて巨大な面は除外（歩行の邪魔をしない）
         if (h < 0.12 && footprint > 4) blocking = false;
-        // 持ち運べる物は通り抜けさせる（拾う前に体当たりして詰まらないように）
-        if (o.userData.tag === 'carry') blocking = false;
-        let p = o.parent;
-        while (p && blocking) {
-          if (p.userData && p.userData.tag === 'carry') blocking = false;
-          p = p.parent;
-        }
+      }
+      // 持ち運べる物は通り抜けさせる（拾う前に体当たりして詰まらないように）
+      if (o.userData.tag === 'carry') blocking = false;
+      for (let p = o.parent; p && blocking; p = p.parent) {
+        if (p.userData && p.userData.tag === 'carry') blocking = false;
       }
       if (!blocking) return;
       if (b.min.y > floorY + BAND_HI || b.max.y < floorY + BAND_LO) return; // 頭上・床すれすれは無視
@@ -510,32 +607,26 @@ gltfLoader.load(DEF.glb, (gltf) => {
       const topC = new THREE.Vector3(
         (bb.min.x + bb.max.x) / 2, bb.max.y, (bb.min.z + bb.max.z) / 2);
 
-      // 蓋（プリミティブ）: 本体より少し広い円盤 + つまみ
-      const lid = new THREE.Group();
+      // 蓋は元データの形状をそのまま使う。ボトルは灰色の本体と黒い樹脂パーツの
+      // 2マテリアル構成だが、黒い側には蓋のほかに底のリングと注ぎ口も入っている。
+      // そのままでは蓋を外すと底と注ぎ口まで消えるので、高さ方向の空きが
+      // いちばん大きいところで切って、上側（＝蓋）だけを別オブジェクトに分ける
+      const parts = [];
+      bottle.traverse((o) => { if (o.isMesh) parts.push(o); });
+      const blackPart = parts.find((o) => {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        return mats.some((m) => m && /lid|cap/i.test(m.name || ''));
+      }) || parts.reduce((a, b2) => (box(b2).max.y > box(a).max.y ? b2 : a));
+      const lid = splitTopPart(blackPart);
+      if (!lid) throw new Error('ボトルの蓋を切り出せませんでした');
       lid.name = 'BottleLid';
-      const lidTop = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.145, 0.15, 0.035, 24),
-        new THREE.MeshLambertMaterial({ color: 0xe9e2d6 })
-      );
-      lid.add(lidTop);
-      const lidKnob = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.045, 0.05, 0.03, 16),
-        new THREE.MeshLambertMaterial({ color: 0xd6cfc2 })
-      );
-      lidKnob.position.y = 0.03;
-      lid.add(lidKnob);
-      lid.position.copy(bottle.worldToLocal(
-        topC.clone().add(new THREE.Vector3(0, 0.015, 0))));
+
       // ボトルのノードは非一様な縮小が掛かっているため、
-      // 子にする蓋・紙には逆スケール・逆回転を入れて実寸で見せる
+      // 子にする紙には逆スケール・逆回転を入れて実寸で見せる
       const bws = new THREE.Vector3();
       bottle.getWorldScale(bws);
       const bwq = new THREE.Quaternion();
       bottle.getWorldQuaternion(bwq);
-      lid.scale.set(1 / bws.x, 1 / bws.y, 1 / bws.z);
-      lid.quaternion.copy(bwq.clone().invert());
-      bottle.add(lid);
-      raycastList.push(lid);
 
       // 中の紙（7）: 蓋を外すまでボトル内に隠れている
       const paper = new THREE.Group();
@@ -550,8 +641,8 @@ gltfLoader.load(DEF.glb, (gltf) => {
       paper.add(pseg.group);
       paper.position.copy(bottle.worldToLocal(
         topC.clone().add(new THREE.Vector3(0, -0.16, 0))));
-      paper.scale.copy(lid.scale);
-      paper.quaternion.copy(lid.quaternion);
+      paper.scale.set(1 / bws.x, 1 / bws.y, 1 / bws.z);
+      paper.quaternion.copy(bwq.clone().invert());
       paper.visible = false; // 蓋を開けるまで見せない
       bottle.add(paper);
       window.__hidden.push(paper);
@@ -695,30 +786,55 @@ gltfLoader.load(DEF.glb, (gltf) => {
       const b = box(o);
       const c = b.getCenter(new THREE.Vector3());
       if (c.x > -0.2 && c.x < 1.85 && c.z > 0.55 && c.z < 0.95 && b.max.y < 2.5) {
-        // 幅2.05m超の部品はドア「枠」。枠は壁に残し、ガラス扉と取っ手だけを開く
-        // （名前は圧縮で変わりうるので寸法で判別する）
-        if (b.max.x - b.min.x > 2.05) return;
+        // ガラス・取っ手・扉の縁（框）をまとめて開く。
+        // 幅2.6m超は戸口まわりの壁なので除く（名前は圧縮で変わりうるため寸法で判別）
+        if (b.max.x - b.min.x > 2.6) return;
         doorParts.push(o);
         doorMeshSet.add(o);
       }
     });
     const db = doorParts.reduce((acc, m) => acc.union(box(m)), new THREE.Box3());
-    // 蝶番: 取っ手の反対側（西端）に軸を立てて、外(+z)へ振り開く。
-    // 取っ手のある側が大きく開く
-    const hinge = new THREE.Group();
-    hinge.position.copy(gltf.scene.worldToLocal(
-      new THREE.Vector3(db.min.x, 0, (db.min.z + db.max.z) / 2)));
-    gltf.scene.add(hinge);
-    hinge.updateMatrixWorld(true);
-    doorParts.forEach((m) => hinge.attach(m));
+
+    // 観音開き: 戸口の中央で左右2枚に割り、それぞれ外側の端を軸にして
+    // 左右対称に開く。1枚ものの部品は中央で切り分ける
+    const midX = (db.min.x + db.max.x) / 2;
+    const westParts = [], eastParts = [];
+    const cv = new THREE.Vector3();
+    for (const m of doorParts.slice()) {
+      const east = splitMeshWhere(m, (wx) => wx > midX);
+      if (east) {
+        doorParts.push(east);
+        doorMeshSet.add(east);
+        westParts.push(m);
+        eastParts.push(east);
+      } else {
+        (box(m).getCenter(cv).x > midX ? eastParts : westParts).push(m);
+      }
+    }
+
+    // 蝶番を左右の端に立てて、どちらも外(+z)へ振り出す。
+    // 軸が西端か東端かで回す向きが逆になるので、角度の符号を分ける
+    const makeHinge = (x, angle, parts) => {
+      const h = new THREE.Group();
+      h.position.copy(gltf.scene.worldToLocal(
+        new THREE.Vector3(x, 0, (db.min.z + db.max.z) / 2)));
+      gltf.scene.add(h);
+      h.updateMatrixWorld(true);
+      parts.forEach((m) => h.attach(m));
+      return { group: h, angle };
+    };
+    const hinges = [
+      makeHinge(db.min.x, -1.75, westParts), // 西端軸: 負方向で外へ
+      makeHinge(db.max.x, 1.75, eastParts),  // 東端軸: 正方向で外へ
+    ];
+
     doorZone = {
       axis: 'z', dir: 1,
       lat1: db.min.x + 0.05, lat2: db.max.x - 0.05,
       bound: db.min.z,            // 部屋側の面
       out: db.max.z + 0.5,        // ここを越えたらクリア
       mode: 'hinge',
-      hinge,
-      hingeAngle: -1.75,          // 約100度、外側へ（西端軸なので負方向）
+      hinges,                     // 約100度、左右対称に開く
     };
     // 戸の外の明るい面
     const outside = new THREE.Mesh(
@@ -863,7 +979,9 @@ function openCap() {
   fwd.y = 0;
   fwd.normalize();
   const land = camera.position.clone().addScaledVector(fwd, 0.7);
-  land.y = bounds.floorY + 0.03;
+  // 部品の原点が底とは限らないので、原点から底までの高さぶん持ち上げて着地させる
+  const lb0 = new THREE.Box3().setFromObject(lid);
+  land.y = bounds.floorY + (from.y - lb0.min.y) + 0.01;
   const fromQ = lid.quaternion.clone();
   const tiltQ = fromQ.clone().multiply(
     new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 2.6));
@@ -872,6 +990,10 @@ function openCap() {
     lid.position.y += Math.sin(Math.min(k, 1) * Math.PI) * 0.25; // 山なりに飛ぶ
     lid.quaternion.slerpQuaternions(fromQ, tiltQ, k);
   }, () => {
+    // 転がった向きでの実際の底に合わせて床へ接地させる
+    lid.updateMatrixWorld(true);
+    const lb = new THREE.Box3().setFromObject(lid);
+    lid.position.y += (bounds.floorY + 0.01) - lb.min.y;
     registerCarry(lid); // 以後は普通に拾って置ける
   });
   // 中の紙がせり上がる
@@ -949,9 +1071,9 @@ function checkSolved() {
   if (state.dial[0] === c[0] && state.dial[1] === c[1] && state.dial[2] === c[2]) {
     state.solved = true;
     if (doorZone.mode === 'hinge') {
-      // 蝶番で外へ振り開く
+      // 蝶番で外へ振り開く（観音開きなので左右まとめて回す）
       tween(1.2, (k) => {
-        doorZone.hinge.rotation.y = doorZone.hingeAngle * k;
+        for (const h of doorZone.hinges) h.group.rotation.y = h.angle * k;
       });
     } else {
       // 横にスライドして開く
