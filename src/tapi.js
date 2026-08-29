@@ -214,7 +214,7 @@ let dialSegs = [];
 const leverPivots = [];
 const leverBusy = [false, false, false];
 let ready = false;
-let capInfo = null;    // ステージ1: ボトルの蓋 { owner, lid, paper, opened }
+const caps = new Map(); // ステージ1: ボトルの蓋。ボトル名 → { lid, paper, opened, riseY }
 let drawerInfo = null; // ステージ2: 教卓の引き出し { group, openX, busy }
 let caseInfo = null;   // ステージ2: 自習ブースの筆箱 { pivot, openAngle, opened }
 
@@ -600,10 +600,16 @@ gltfLoader.load(DEF.glb, (gltf) => {
     markCushion(carryables.get('Cushion_07').node, 4);
     markCushion(carryables.get('Cushion_02').node, 2);
 
-    // 中桁「7」: カウンターのボトル。蓋を外すと中から「7」の紙が出てくる。
-    // 手に取って蓋をタップ → 蓋が飛んで床に落ち、紙がせり上がる
-    {
-      const bottle = carryables.get('BottleSet_1').node;
+    // 中桁「7」: ボトルの蓋を外すと中から「7」の紙が出てくる。
+    // 手に取って蓋をタップ → 蓋が飛んで床に落ち、紙がせり上がる。
+    // 5本とも同じ見た目なので5本とも開くようにし、当たりは1本だけにする
+    // （見た目が同じ物の一部だけ反応しないと、壊れていると受け取られる）
+    const DIGIT_BOTTLE = 'BottleSet_1'; // 中に「7」の紙が入っている当たりの1本
+    for (let i = 1; i <= 5; i++) {
+      const name = 'BottleSet_' + i;
+      const entry = carryables.get(name);
+      if (!entry) continue;
+      const bottle = entry.node;
       const bb = box(bottle);
       const topC = new THREE.Vector3(
         (bb.min.x + bb.max.x) / 2, bb.max.y, (bb.min.z + bb.max.z) / 2);
@@ -618,9 +624,13 @@ gltfLoader.load(DEF.glb, (gltf) => {
         const mats = Array.isArray(o.material) ? o.material : [o.material];
         return mats.some((m) => m && /lid|cap/i.test(m.name || ''));
       }) || parts.reduce((a, b2) => (box(b2).max.y > box(a).max.y ? b2 : a));
-      const lid = splitTopPart(blackPart);
-      if (!lid) throw new Error('ボトルの蓋を切り出せませんでした');
-      lid.name = 'BottleLid';
+      const lid = blackPart ? splitTopPart(blackPart) : null;
+      if (!lid) {
+        // 当たりの1本が開かないと詰むので、そこだけは失敗を見逃さない
+        if (name === DIGIT_BOTTLE) throw new Error('ボトルの蓋を切り出せませんでした');
+        continue;
+      }
+      lid.name = 'BottleLid_' + i;
 
       // ボトルのノードは非一様な縮小が掛かっているため、
       // 子にする紙には逆スケール・逆回転を入れて実寸で見せる
@@ -629,28 +639,30 @@ gltfLoader.load(DEF.glb, (gltf) => {
       const bwq = new THREE.Quaternion();
       bottle.getWorldQuaternion(bwq);
 
-      // 中の紙（7）: 蓋を外すまでボトル内に隠れている
-      const paper = new THREE.Group();
-      const sheet = new THREE.Mesh(
-        new THREE.BoxGeometry(0.09, 0.13, 0.004),
-        new THREE.MeshLambertMaterial({ color: 0xf7f4ec })
-      );
-      paper.add(sheet);
-      const pseg = makeSevenSeg(0.075, 0x2f2f2f);
-      pseg.set(7);
-      pseg.group.position.z = 0.004;
-      paper.add(pseg.group);
-      paper.position.copy(bottle.worldToLocal(
-        topC.clone().add(new THREE.Vector3(0, -0.16, 0))));
-      paper.scale.set(1 / bws.x, 1 / bws.y, 1 / bws.z);
-      paper.quaternion.copy(bwq.clone().invert());
-      paper.visible = false; // 蓋を開けるまで見せない
-      bottle.add(paper);
-      window.__hidden.push(paper);
+      let paper = null;
+      if (name === DIGIT_BOTTLE) {
+        // 中の紙（7）: 蓋を外すまでボトル内に隠れている
+        paper = new THREE.Group();
+        const sheet = new THREE.Mesh(
+          new THREE.BoxGeometry(0.09, 0.13, 0.004),
+          new THREE.MeshLambertMaterial({ color: 0xf7f4ec })
+        );
+        paper.add(sheet);
+        const pseg = makeSevenSeg(0.075, 0x2f2f2f);
+        pseg.set(7);
+        pseg.group.position.z = 0.004;
+        paper.add(pseg.group);
+        paper.position.copy(bottle.worldToLocal(
+          topC.clone().add(new THREE.Vector3(0, -0.16, 0))));
+        paper.scale.set(1 / bws.x, 1 / bws.y, 1 / bws.z);
+        paper.quaternion.copy(bwq.clone().invert());
+        paper.visible = false; // 蓋を開けるまで見せない
+        bottle.add(paper);
+        window.__hidden.push(paper);
+      }
 
       // 紙のせり上がり量はボトルのローカル単位（縮小が掛かる）で持つ
-      capInfo = { owner: 'BottleSet_1', lid, paper, opened: false,
-        riseY: 0.27 / bws.y };
+      caps.set(name, { lid, paper, opened: false, riseY: 0.27 / bws.y });
     }
 
     // ドア（西壁）: 正解で横にスライドして開く
@@ -1033,10 +1045,10 @@ function clearGame() {
 }
 
 /* ---------------- ボトルの蓋 / 教卓の引き出し ---------------- */
-function openCap() {
-  if (!capInfo || capInfo.opened) return;
-  capInfo.opened = true;
-  const lid = capInfo.lid;
+function openCap(cap) {
+  if (!cap || cap.opened) return;
+  cap.opened = true;
+  const lid = cap.lid;
   scene.attach(lid); // ワールド位置を保ったままボトルから切り離す
   // 蓋は弧を描いて足元の床へ落ち、その後は拾って置ける物になる
   const from = lid.position.clone();
@@ -1062,11 +1074,12 @@ function openCap() {
     lid.position.y += (bounds.floorY + 0.01) - lb.min.y;
     registerCarry(lid); // 以後は普通に拾って置ける
   });
-  // 中の紙がせり上がる
-  const paper = capInfo.paper;
+  // 中の紙がせり上がる（入っていないボトルは空のまま）
+  const paper = cap.paper;
+  if (!paper) return;
   paper.visible = true;
   const py = paper.position.y;
-  tween(0.5, (k) => { paper.position.y = py + capInfo.riseY * k; });
+  tween(0.5, (k) => { paper.position.y = py + cap.riseY * k; });
 }
 
 function openDrawer() {
@@ -1207,12 +1220,13 @@ function handleTap(x, y) {
 
   // ボトルの蓋: 持っているボトルの蓋をタップしたら外す。
   // （持ち物は通常ピックから除外されるため、除外なしで先に調べる）
-  if (capInfo && !capInfo.opened && state.holding === capInfo.owner) {
+  const heldCap = state.holding ? caps.get(state.holding) : null;
+  if (heldCap && !heldCap.opened) {
     const raw = pick(x, y, null);
     if (raw) {
       let p = raw.hit.object, onLid = false;
-      while (p) { if (p === capInfo.lid) { onLid = true; break; } p = p.parent; }
-      if (onLid) { openCap(); return; } // 観察モードは続ける
+      while (p) { if (p === heldCap.lid) { onLid = true; break; } p = p.parent; }
+      if (onLid) { openCap(heldCap); return; } // 観察モードは続ける
     }
   }
 
