@@ -216,6 +216,7 @@ const leverBusy = [false, false, false];
 let ready = false;
 let capInfo = null;    // ステージ1: ボトルの蓋 { owner, lid, paper, opened }
 let drawerInfo = null; // ステージ2: 教卓の引き出し { group, openX, busy }
+let caseInfo = null;   // ステージ2: 自習ブースの筆箱 { pivot, openAngle, opened }
 
 /* ---------------- 共通部品 ---------------- */
 // メッシュを高さで2つに割り、上側だけを新しいメッシュとして取り出す。
@@ -692,6 +693,30 @@ gltfLoader.load(DEF.glb, (gltf) => {
     root.updateMatrixWorld(true);
     markBottom(redBook, 5, 0xd2413a, 0); // 本の底面は細長いので向きが90度違う
 
+    // ヒント: その1冊にだけ赤い栞を挟んでおく。はみ出しだけだと
+    // 総当たりで全部の本を裏返すことになり、単調で時間を食う。
+    // 本自体の色は変えない（1冊だけ色違いは答えが見えすぎる）
+    {
+      const bws = new THREE.Vector3();
+      redBook.getWorldScale(bws);
+      const bwq = new THREE.Quaternion();
+      redBook.getWorldQuaternion(bwq);
+      const ribbon = new THREE.Mesh(
+        new THREE.BoxGeometry(0.016, 0.05, 0.003),
+        new THREE.MeshLambertMaterial({ color: 0xc2372f })
+      );
+      // 本のノードには縮小が掛かっているので、逆スケール・逆回転で実寸に戻す
+      ribbon.scale.set(1 / bws.x, 1 / bws.y, 1 / bws.z);
+      ribbon.quaternion.copy(bwq.clone().invert());
+      const rb = box(redBook);
+      const topC = new THREE.Vector3(
+        (rb.min.x + rb.max.x) / 2, rb.max.y, (rb.min.z + rb.max.z) / 2);
+      // 上端から3cmほど覗かせる（半分は本に挟まっている見た目）
+      ribbon.position.copy(redBook.worldToLocal(
+        topC.clone().add(new THREE.Vector3(0, 0.012, -0.01))));
+      redBook.add(ribbon);
+    }
+
     // 黄の「3」への道のり: 鏡の後ろに鍵 → 教卓の引き出しを開けると「3」。
     // 鍵（プリミティブ）を鏡の裏の机の上に置く。正面からは鏡に隠れて見えない
     {
@@ -759,8 +784,9 @@ gltfLoader.load(DEF.glb, (gltf) => {
       drawerInfo = { group: drawer, openX: drawer.position.x + 0.36, busy: false };
     }
 
-    // 青の「8」: 自習ブース Personal-Desk003 の机の上。
-    // ブースに歩いて入らないと見えない
+    // 青の「8」: 自習ブース Personal-Desk003 の机の上に置いた筆箱の中。
+    // ブースに入るだけでは数字は見えず、筆箱をタップして蓋を開ける必要がある
+    // （引き出しと同じ「タップして開ける」動詞の再利用。新しい操作は増やさない）
     {
       const booth = nodeByName('Personal-Desk003');
       const bb = box(booth);
@@ -770,12 +796,52 @@ gltfLoader.load(DEF.glb, (gltf) => {
         new THREE.Vector3(cx, bb.max.y - 0.05, cz), new THREE.Vector3(0, -1, 0));
       const hit = down.intersectObject(booth, true)[0];
       const surfaceY = hit ? hit.point.y : bb.min.y + 0.7;
-      const seg = makeSevenSeg(0.14, 0x3465c9);
+
+      const pcase = new THREE.Group();
+      pcase.name = 'PenCase';
+      pcase.userData.tag = 'case';
+      const shell = new THREE.MeshLambertMaterial({ color: 0x6f675e });
+      const inner = new THREE.MeshLambertMaterial({ color: 0xded7c9 });
+
+      // 受け皿（底＋四方の縁）。蓋が開いたとき中が見えるように箱にする
+      const baseM = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.012, 0.10), shell);
+      pcase.add(baseM);
+      const wallLo = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.03, 0.008), shell);
+      wallLo.position.set(0, 0.021, 0.046);
+      pcase.add(wallLo);
+      const wallHi = wallLo.clone();
+      wallHi.position.z = -0.046;
+      pcase.add(wallHi);
+      const wallL = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.03, 0.10), shell);
+      wallL.position.set(-0.116, 0.021, 0);
+      pcase.add(wallL);
+      const wallR = wallL.clone();
+      wallR.position.x = 0.116;
+      pcase.add(wallR);
+      // 中敷き（数字を読みやすくする明るい下地）
+      const mat = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.004, 0.085), inner);
+      mat.position.y = 0.008;
+      pcase.add(mat);
+
+      const seg = makeSevenSeg(0.062, 0x3465c9);
       seg.set(8);
       seg.group.rotation.x = -Math.PI / 2; // 上向き
-      seg.group.position.set(cx, surfaceY + 0.01, cz);
-      scene.add(seg.group);
+      seg.group.position.set(0, 0.012, 0);
+      pcase.add(seg.group);
       window.__hidden.push(seg.group);
+
+      // 蓋: 奥の縁を軸にして後ろへ倒れる
+      const pivot = new THREE.Group();
+      pivot.position.set(0, 0.036, -0.05);
+      pcase.add(pivot);
+      const lid = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.014, 0.108), shell);
+      lid.position.set(0, 0.007, 0.05);
+      pivot.add(lid);
+
+      pcase.position.set(cx, surfaceY, cz);
+      scene.add(pcase);
+      raycastList.push(pcase);
+      caseInfo = { pivot, openAngle: -2.2, opened: false };
     }
 
     // 出口: 引き戸の左（部屋の内側から見て東）にある入口の扉。
@@ -1032,6 +1098,17 @@ function openDrawer() {
   }
 }
 
+// 筆箱の蓋を開ける。中の「8」が見えるようになる
+function openCase() {
+  if (!caseInfo || caseInfo.opened) return;
+  caseInfo.opened = true;
+  const pivot = caseInfo.pivot;
+  const from = pivot.rotation.x;
+  tween(0.45, (k) => {
+    pivot.rotation.x = from + (caseInfo.openAngle - from) * k;
+  });
+}
+
 function jiggleDrawer() {
   if (!drawerInfo || drawerInfo.busy) return;
   drawerInfo.busy = true;
@@ -1152,6 +1229,12 @@ function handleTap(x, y) {
     if (state.unlocked) return;
     if (state.holding === 'DrawerKey') openDrawer();
     else jiggleDrawer();
+    return;
+  }
+
+  // 自習ブースの筆箱: タップすると蓋が開き、中の数字が見える
+  if (res.tag === 'case' && caseInfo && res.hit.distance <= PLACE_DIST) {
+    openCase();
     return;
   }
 
